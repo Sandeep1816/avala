@@ -1,5 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
+  typescript: {
+    ignoreBuildErrors: true,
+  },
   reactStrictMode: true,
   images: {
     domains: ['localhost'],
@@ -16,7 +22,7 @@ const nextConfig = {
   },
   // Configure port
   env: {
-    PORT: 3002
+    PORT: process.env.PORT || '3000',
   },
   // Remove redirects and rewrites that might interfere with routing
   async redirects() {

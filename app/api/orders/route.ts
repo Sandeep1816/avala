@@ -1,51 +1,53 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { verify } from 'jsonwebtoken';
-import { getUserIdFromToken } from '@/lib/auth';
 
-// Middleware to verify user token
-async function verifyUserToken(request: NextRequest) {
-  const token = request.headers.get('authorization')?.split(' ')[1];
+const JWT_SECRET = process.env.NEXTAUTH_SECRET || 'your-secret-key';
 
-  if (!token) {
+interface CartItem {
+  productId: string;
+  quantity: number;
+  product: {
+    price: number;
+    name: string;
+  };
+}
+
+// Helper function to get user ID from token
+const getUserIdFromToken = (request: NextRequest) => {
+  const authHeader = request.headers.get('Authorization');
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return null;
+  }
+
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = verify(token, JWT_SECRET) as { userId: string; isAdmin: boolean };
+    return decoded.userId;
+  } catch (error) {
+    return null;
+  }
+};
+
+// Get orders
+export async function GET(request: NextRequest) {
+  const userId = getUserIdFromToken(request);
+  if (!userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
   try {
-    const decoded = verify(token, process.env.NEXTAUTH_SECRET || 'your-secret-key') as {
-      userId: string;
-      isAdmin: boolean;
-    };
-
-    return decoded;
-  } catch (error) {
-    return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
-  }
-}
-
-// GET /api/orders - Get user's orders or all orders (admin)
-export async function GET(request: NextRequest) {
-  try {
-    const userId = await getUserIdFromToken(request);
-    if (!userId) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
     const orders = await prisma.order.findMany({
       where: { userId },
-      orderBy: { createdAt: 'desc' },
       include: {
         items: {
           include: {
-            product: {
-              select: {
-                id: true,
-                name: true,
-                image: true,
-              },
-            },
+            product: true,
           },
         },
+      },
+      orderBy: {
+        createdAt: 'desc',
       },
     });
 
@@ -59,21 +61,21 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// POST /api/orders - Create new order
+// Create order
 export async function POST(request: NextRequest) {
-  const decoded = await verifyUserToken(request);
-  if ('error' in decoded) return decoded;
+  const userId = getUserIdFromToken(request);
+  if (!userId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
 
   try {
-    const { address, paymentId } = await request.json();
+    const { items, shippingAddress, paymentMethod } = await request.json();
 
-    // Get user's cart items
+    // Validate cart items
     const cartItems = await prisma.cartItem.findMany({
-      where: { userId: decoded.userId },
-      include: {
-        product: true,
-      },
-    });
+      where: { userId },
+      include: { product: true },
+    }) as CartItem[];
 
     if (cartItems.length === 0) {
       return NextResponse.json(
@@ -82,28 +84,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Calculate total
-    const total = cartItems.reduce(
-      (sum, item) => sum + item.product.price * item.quantity,
-      0
-    );
-
     // Create order
     const order = await prisma.order.create({
       data: {
-        userId: decoded.userId,
-        total,
-        status: 'pending',
-        address,
-        paymentId,
+        userId,
         items: {
-          create: cartItems.map((item) => ({
+          create: cartItems.map((item: CartItem) => ({
             productId: item.productId,
-            name: item.product.name,
-            price: item.product.price,
             quantity: item.quantity,
+            price: item.product.price,
+            name: item.product.name
           })),
         },
+        shippingAddress,
+        paymentMethod,
+        status: 'PENDING',
       },
       include: {
         items: {
@@ -114,30 +109,16 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // Update product stock
-    await Promise.all(
-      cartItems.map((item) =>
-        prisma.product.update({
-          where: { id: item.productId },
-          data: {
-            stock: {
-              decrement: item.quantity,
-            },
-          },
-        })
-      )
-    );
-
-    // Clear user's cart
+    // Clear cart
     await prisma.cartItem.deleteMany({
-      where: { userId: decoded.userId },
+      where: { userId },
     });
 
-    return NextResponse.json(order, { status: 201 });
+    return NextResponse.json(order);
   } catch (error) {
     console.error('Error creating order:', error);
     return NextResponse.json(
-      { error: 'An error occurred while creating the order' },
+      { error: 'Failed to create order' },
       { status: 500 }
     );
   }
